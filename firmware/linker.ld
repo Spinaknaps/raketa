@@ -16,4 +16,10 @@ SECTIONS
         *(.text*)
         *(.rodata*)
     } > FLASH
+
+    .bss (NOLOAD) :
+    {
+        *(.bss*)
+        *(COMMON)
+    } > SRAM
 }
