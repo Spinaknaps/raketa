@@ -57,11 +57,17 @@ static std::string exchangeDetail(
 RunResult runPressureTest(
     DeviceClient &client,
     std::uint8_t mode,
-    const std::array<PressureStep, 3> &scenario,
+    const std::vector<PressureStep> &scenario,
     const std::function<void(const StepResult &)> &onStep
 )
 {
     RunResult run{TestOutcome::Pass, {}, {}};
+
+    if (scenario.empty()) {
+        run.outcome = TestOutcome::CommandError;
+        run.detail = "Scenario has no steps";
+        return run;
+    }
 
     const auto modeResult = client.setMode(mode);
     if (modeResult.status != ExchangeStatus::Ok) {

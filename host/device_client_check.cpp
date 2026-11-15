@@ -76,6 +76,18 @@ int main(int argc, char *argv[])
     }
     out << "Runner normal: PASS" << Qt::endl;
 
+    const std::vector<PressureStep> singleStep{pressureScenario.front()};
+    const auto single = runPressureTest(client, 0u, singleStep);
+
+    if (single.outcome != TestOutcome::Pass ||
+        single.steps.size() != 1u ||
+        single.steps.front().measuredPa != 100000u) {
+        err << "Expected PASS after one step with 100000 Pa" << Qt::endl;
+        return 1;
+        }
+
+    out << "Runner single step: PASS" << Qt::endl;
+    
     const auto stuck = runPressureTest(client, 1u, pressureScenario);
     if (stuck.outcome != TestOutcome::Fail || stuck.steps.size() != 2u ||
         stuck.steps.back().measuredPa != 100000u) {
@@ -112,7 +124,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     out << "Read cancellation OK" << Qt::endl;
-    
+
     socket.disconnectFromHost();
     if (client.readSample().status != ExchangeStatus::ConnectionError) {
         err << "Expected a connection error after disconnect" << Qt::endl;
