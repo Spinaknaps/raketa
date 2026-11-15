@@ -1,4 +1,4 @@
-#include "../firmware/protocol.h"
+#include "protocol.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -11,7 +11,11 @@ static void print_bytes(const uint8_t *data, size_t length)
     puts("");
 }
 
-int main(void)
+static const uint8_t expected_read[] = {
+    0xA5, 0x5A, 0x01, 0x03, 0x02, 0x00, 0x00, 0x00, 0x0A, 0x48
+};
+
+static int check_encoding(void)
 {
     const uint8_t crc_input[] = "123456789";
     const uint16_t crc = protocol_crc16(crc_input, sizeof crc_input - 1u);
@@ -23,9 +27,6 @@ int main(void)
 
     uint8_t frame[PROTOCOL_MAX_FRAME_SIZE];
 
-    const uint8_t expected_read[] = {
-        0xA5, 0x5A, 0x01, 0x03, 0x02, 0x00, 0x00, 0x00, 0x0A, 0x48
-    };
 
     size_t length = protocol_encode_frame(
         frame, sizeof frame, 0x03u, 2u, NULL, 0u
@@ -89,7 +90,11 @@ int main(void)
         memcmp(frame, expected_sample, sizeof expected_sample) != 0) {
         return 1;
         }
+    return 0;
+}
 
+static int check_read_sample(void)
+{
     ProtocolDecoder decoder;
     ProtocolFrame decoded;
     protocol_decoder_init(&decoder);
@@ -113,7 +118,13 @@ int main(void)
         }
 
     puts("Decoder READ_SAMPLE OK");
+    return 0;
+}
 
+static int check_frame_timeout(void)
+{
+    ProtocolDecoder decoder;
+    ProtocolFrame decoded;
     protocol_decoder_init(&decoder);
 
     for (size_t i = 0; i < 8u; ++i) {
@@ -132,7 +143,13 @@ int main(void)
         return 1;
         }
     puts("Incomplete frame timeout OK");
+    return 0;
+}
 
+static int check_recovery_after_bad_length(void)
+{
+    ProtocolDecoder decoder;
+    ProtocolFrame decoded;
     protocol_decoder_init(&decoder);
 
     uint8_t damaged[sizeof expected_read];
@@ -163,7 +180,16 @@ int main(void)
         return 1;
     }
     puts("Recovery after bad length OK");
-    
+    return 0;
+}
+
+int main(void)
+{
+    if (check_encoding() || check_read_sample() || check_frame_timeout() ||
+        check_recovery_after_bad_length()) {
+        return 1;
+    }
+
     puts("Protocol checks OK");
     return 0;
 }

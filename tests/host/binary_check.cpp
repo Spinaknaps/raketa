@@ -6,7 +6,7 @@
 #include <QByteArray>
 
 extern "C" {
-#include "../firmware/protocol.h"
+#include "protocol.h"
 }
 
 static bool exchange(

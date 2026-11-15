@@ -1,4 +1,4 @@
-#include "../firmware/pressure_model.h"
+#include "pressure_model.h"
 
 #include <assert.h>
 #include <stdio.h>

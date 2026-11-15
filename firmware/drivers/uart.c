@@ -1,6 +1,6 @@
 #include "uart.h"
 
-#define REG32(address) (*(volatile uint32_t *)(address))
+#define REG32(address) (*(volatile uint32_t *)(uintptr_t)(address))
 
 #define UART0_DR    REG32(0x4000C000u)  /* Регистр данных */
 #define UART0_FR    REG32(0x4000C018u)  /* Флаги состояния */
@@ -30,17 +30,6 @@ void uart0_write_bytes(const uint8_t *data, size_t length)
 
         UART0_DR = data[i];
     }
-}
-
-void uart0_write(const char *message)
-{
-    const char *end = message;
-
-    while (*end != '\0') {
-        ++end;
-    }
-
-    uart0_write_bytes((const uint8_t *)message, (size_t)(end - message));
 }
 
 bool uart0_try_read_byte(uint8_t *byte)

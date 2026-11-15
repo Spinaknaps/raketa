@@ -1,3 +1,4 @@
+#include "test_scenario.h"
 #include "device_client.h"
 #include "test_runner.h"
 

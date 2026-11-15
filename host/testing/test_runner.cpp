@@ -54,6 +54,44 @@ static std::string exchangeDetail(
     return prefix + "unknown exchange status";
 }
 
+static StepResult runPressureStep(
+    DeviceClient &client, const PressureStep &step, std::size_t number
+)
+{
+    StepResult result{
+        number, step.expectedPa, step.tolerancePa,
+        std::nullopt, TestOutcome::Pass, {}
+    };
+
+    const auto stimulus = client.setStimulus(step.stimulusPa);
+    if (stimulus.status != ExchangeStatus::Ok) {
+        result.outcome = exchangeOutcome(stimulus.status);
+        result.detail = exchangeDetail("SET_STIMULUS", stimulus);
+        return result;
+    }
+
+    const auto sample = client.readSample();
+    if (sample.status != ExchangeStatus::Ok) {
+        result.outcome = exchangeOutcome(sample.status);
+        result.detail = exchangeDetail("READ_SAMPLE", sample);
+        return result;
+    }
+
+    if (!sample.pressurePa) {
+        result.outcome = TestOutcome::CommandError;
+        result.detail = "READ_SAMPLE: response has no pressure";
+        return result;
+    }
+
+    result.measuredPa = sample.pressurePa;
+    if (!isWithinTolerance(step, *result.measuredPa)) {
+        result.outcome = TestOutcome::Fail;
+        result.detail = "Pressure outside allowed range";
+    }
+
+    return result;
+}
+
 RunResult runPressureTest(
     DeviceClient &client,
     std::uint8_t mode,
@@ -77,33 +115,9 @@ RunResult runPressureTest(
     }
 
     for (std::size_t i = 0; i < scenario.size(); ++i) {
-        const auto &step = scenario[i];
-        auto &result = run.steps.emplace_back(StepResult{
-            i + 1u, step.expectedPa, step.tolerancePa,
-            std::nullopt, TestOutcome::Pass, {}
-        });
-
-        const auto stimulus = client.setStimulus(step.stimulusPa);
-        if (stimulus.status != ExchangeStatus::Ok) {
-            result.outcome = exchangeOutcome(stimulus.status);
-            result.detail = exchangeDetail("SET_STIMULUS", stimulus);
-        } else {
-            const auto sample = client.readSample();
-            if (sample.status != ExchangeStatus::Ok) {
-                result.outcome = exchangeOutcome(sample.status);
-                result.detail = exchangeDetail("READ_SAMPLE", sample);
-            } else if (!sample.pressurePa) {
-                result.outcome = TestOutcome::CommandError;
-                result.detail = "READ_SAMPLE: response has no pressure";
-            } else {
-                result.measuredPa = sample.pressurePa;
-
-                if (!isWithinTolerance(step, *result.measuredPa)) {
-                    result.outcome = TestOutcome::Fail;
-                    result.detail = "Pressure outside allowed range";
-                }
-            }
-        }
+        const auto &result = run.steps.emplace_back(
+            runPressureStep(client, scenario[i], i + 1u)
+        );
 
         if (onStep) {
             onStep(result);
