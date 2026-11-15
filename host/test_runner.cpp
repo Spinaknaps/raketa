@@ -57,7 +57,8 @@ static std::string exchangeDetail(
 RunResult runPressureTest(
     DeviceClient &client,
     std::uint8_t mode,
-    const std::array<PressureStep, 3> &scenario
+    const std::array<PressureStep, 3> &scenario,
+    const std::function<void(const StepResult &)> &onStep
 )
 {
     RunResult run{TestOutcome::Pass, {}, {}};
@@ -96,6 +97,10 @@ RunResult runPressureTest(
                     result.detail = "Pressure outside allowed range";
                 }
             }
+        }
+
+        if (onStep) {
+            onStep(result);
         }
 
         if (result.outcome != TestOutcome::Pass) {
