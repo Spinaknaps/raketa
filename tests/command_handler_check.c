@@ -1,4 +1,4 @@
-#include "../firmware/command_handler.h"
+#include "command_handler.h"
 
 #include <assert.h>
 #include <stdio.h>

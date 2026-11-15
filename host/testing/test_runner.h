@@ -1,6 +1,7 @@
 #pragma once
 
-#include "test_scenario.h"
+#include "pressure_step.h"
+#include "run_result.h"
 
 #include <functional>
 

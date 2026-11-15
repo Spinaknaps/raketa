@@ -1,6 +1,6 @@
 #include "timer.h"
 
-#define REG32(address) (*(volatile uint32_t *)(address))
+#define REG32(address) (*(volatile uint32_t *)(uintptr_t)(address))
 
 #define SYSTICK_CTRL REG32(0xE000E010u)
 #define SYSTICK_LOAD REG32(0xE000E014u)
