@@ -1,5 +1,6 @@
 #include "device_client.h"
 #include "test_runner.h"
+#include "history_store.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -21,11 +22,21 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QCloseEvent>
+#include <QDir>
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QStandardPaths>
+#include <QSqlQuery>
+#include <QDateTime>
+#include <QDialog>
+#include <QMessageBox>
+#include <QVariant>
 
 #include <algorithm>
 #include <vector>
 #include <atomic>
 #include <functional>
+
 
 class PressureChart : public QWidget {
 public:
@@ -149,8 +160,199 @@ protected:
     }
 };
 
+static bool initializeHistorySchema(QSqlDatabase &db, QString &error) {
+    QSqlQuery query(db);
+
+    if (!query.exec(QStringLiteral("PRAGMA foreign_keys = ON"))) {
+        error = query.lastError().text();
+        return false;
+    }
+
+    if (!db.transaction()) {
+        error = db.lastError().text();
+        return false;
+    }
+
+    const bool created = query.exec(QStringLiteral(R"sql(
+        CREATE TABLE IF NOT EXISTS runs (
+            id             INTEGER PRIMARY KEY,
+            started_at_utc TEXT NOT NULL,
+            scenario       TEXT NOT NULL,
+            mode           TEXT NOT NULL,
+            outcome        TEXT NOT NULL,
+            detail         TEXT NOT NULL
+        )
+    )sql")) && query.exec(QStringLiteral(R"sql(
+        CREATE TABLE IF NOT EXISTS step_results (
+            run_id      INTEGER NOT NULL,
+            step_number INTEGER NOT NULL,
+            expected_pa INTEGER NOT NULL,
+            tolerance_pa INTEGER NOT NULL,
+            measured_pa INTEGER,
+            outcome     TEXT NOT NULL,
+            detail      TEXT NOT NULL,
+            PRIMARY KEY (run_id, step_number),
+            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+        )
+    )sql"));
+
+    if (!created) {
+        error = query.lastError().text();
+        db.rollback();
+        return false;
+    }
+
+    if (!db.commit()) {
+        error = db.lastError().text();
+        db.rollback();
+        return false;
+    }
+
+    return true;
+}
+
+static void showHistory(QSqlDatabase &db, QWidget *parent)
+{
+    if (!db.isOpen()) {
+        QMessageBox::warning(
+            parent, QStringLiteral("История"),
+            QStringLiteral("База истории недоступна.")
+        );
+        return;
+    }
+
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("История испытаний"));
+    dialog.resize(900, 560);
+
+    auto *layout = new QVBoxLayout(&dialog);
+
+    auto *runs = new QTableWidget(0, 4, &dialog);
+    runs->setHorizontalHeaderLabels({
+        QStringLiteral("Запуск (UTC)"),
+        QStringLiteral("Сценарий"),
+        QStringLiteral("Режим"),
+        QStringLiteral("Итог")
+    });
+    runs->setSelectionBehavior(QAbstractItemView::SelectRows);
+    runs->setSelectionMode(QAbstractItemView::SingleSelection);
+    runs->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    runs->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+
+    auto *detail = new QLabel(
+        QStringLiteral("Выбери прогон, чтобы увидеть его ступени."), &dialog
+    );
+    detail->setWordWrap(true);
+
+    auto *runSteps = new QTableWidget(0, 6, &dialog);
+    runSteps->setHorizontalHeaderLabels({
+        QStringLiteral("Ступень"),
+        QStringLiteral("Эталон, Па"),
+        QStringLiteral("Допуск, Па"),
+        QStringLiteral("Измерение, Па"),
+        QStringLiteral("Итог"),
+        QStringLiteral("Причина")
+    });
+    runSteps->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    runSteps->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+
+    layout->addWidget(runs, 1);
+    layout->addWidget(detail);
+    layout->addWidget(runSteps, 1);
+
+    {
+        QSqlQuery query(db);
+        if (!query.exec(QStringLiteral(R"sql(
+            SELECT id, started_at_utc, scenario, mode, outcome, detail
+            FROM runs
+            ORDER BY started_at_utc DESC, id DESC
+        )sql"))) {
+            QMessageBox::warning(
+                parent, QStringLiteral("Ошибка чтения истории"),
+                query.lastError().text()
+            );
+            return;
+        }
+
+        while (query.next()) {
+            const int row = runs->rowCount();
+            runs->insertRow(row);
+
+            auto *time = new QTableWidgetItem(query.value(1).toString());
+            time->setData(Qt::UserRole, query.value(0));
+            time->setData(Qt::UserRole + 1, query.value(5));
+            runs->setItem(row, 0, time);
+
+            for (int column = 1; column < 4; ++column) {
+                runs->setItem(
+                    row, column,
+                    new QTableWidgetItem(query.value(column + 1).toString())
+                );
+            }
+        }
+    }
+
+    QObject::connect(
+        runs, &QTableWidget::currentCellChanged, &dialog,
+        [&](int row, int, int, int) {
+            runSteps->setRowCount(0);
+
+            const auto *time = row >= 0 ? runs->item(row, 0) : nullptr;
+            if (time == nullptr) {
+                detail->setText(QStringLiteral("Выбери прогон."));
+                return;
+            }
+
+            const QString reason = time->data(Qt::UserRole + 1).toString();
+            detail->setText(reason.isEmpty()
+                ? QStringLiteral("Причина завершения отсутствует.")
+                : QStringLiteral("Причина: %1").arg(reason));
+
+            QSqlQuery query(db);
+            if (!query.prepare(QStringLiteral(R"sql(
+                SELECT step_number, expected_pa, tolerance_pa,
+                       measured_pa, outcome, detail
+                FROM step_results
+                WHERE run_id = :run_id
+                ORDER BY step_number
+            )sql"))) {
+                detail->setText(query.lastError().text());
+                return;
+            }
+
+            query.bindValue(QStringLiteral(":run_id"), time->data(Qt::UserRole));
+            if (!query.exec()) {
+                detail->setText(query.lastError().text());
+                return;
+            }
+
+            while (query.next()) {
+                const int stepRow = runSteps->rowCount();
+                runSteps->insertRow(stepRow);
+
+                for (int column = 0; column < 6; ++column) {
+                    const QVariant value = query.value(column);
+                    runSteps->setItem(
+                        stepRow, column,
+                        new QTableWidgetItem(value.isNull() ? QString{} : value.toString())
+                    );
+                }
+            }
+        }
+    );
+
+    if (runs->rowCount() == 0) {
+        detail->setText(QStringLiteral("Сохранённых прогонов пока нет."));
+    } else {
+        runs->setCurrentCell(0, 0);
+    }
+
+    dialog.exec();
+}
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
+    QApplication::setApplicationName(QStringLiteral("raketa"));
 
     DashboardWindow window;
     window.setWindowTitle(QStringLiteral("raketa — стенд испытаний"));
@@ -186,6 +388,8 @@ int main(int argc, char *argv[]) {
     controls->addWidget(mode);
     controls->addWidget(start);
     controls->addWidget(cancel);
+    auto *history = new QPushButton(QStringLiteral("История"));
+    controls->addWidget(history);
     layout->addLayout(controls);
 
     auto *status = new QLabel(QStringLiteral("Статус: ожидание запуска"));
@@ -215,6 +419,57 @@ int main(int argc, char *argv[]) {
     auto *log = new QPlainTextEdit;
     log->setReadOnly(true);
     layout->addWidget(log, 1);
+
+    QSqlDatabase historyDb;
+
+    const QString dataDir = QStandardPaths::writableLocation(
+        QStandardPaths::AppLocalDataLocation
+    );
+
+    if (dataDir.isEmpty() || !QDir().mkpath(dataDir)) {
+        log->appendPlainText(
+            QStringLiteral("SQLite: не удалось создать каталог данных: %1")
+            .arg(dataDir)
+        );
+    } else if (!QSqlDatabase::isDriverAvailable(QStringLiteral("QSQLITE"))) {
+        log->appendPlainText(
+            QStringLiteral("SQLite: драйвер QSQLITE недоступен")
+        );
+    } else {
+        const QString dbPath = QDir(dataDir).filePath(
+            QStringLiteral("history.sqlite")
+        );
+
+        historyDb = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), QStringLiteral("raketa_history")
+        );
+        historyDb.setDatabaseName(dbPath);
+
+        if (historyDb.open()) {
+            QString schemaError;
+
+            if (initializeHistorySchema(historyDb, schemaError)) {
+                log->appendPlainText(
+                    QStringLiteral("SQLite: таблицы истории готовы — %1").arg(dbPath)
+                );
+            } else {
+                log->appendPlainText(
+                    QStringLiteral("SQLite: ошибка создания таблиц — %1")
+                    .arg(schemaError)
+                );
+                historyDb.close();
+            }
+        } else {
+            log->appendPlainText(
+                QStringLiteral("SQLite: не удалось открыть %1 — %2")
+                .arg(dbPath, historyDb.lastError().text())
+            );
+        }
+    }
+
+    QObject::connect(history, &QPushButton::clicked, &window, [&] {
+        showHistory(historyDb, &window);
+    });
 
     QThread *activeThread = nullptr;
     std::atomic_bool cancelRequested{false};
@@ -280,6 +535,10 @@ int main(int argc, char *argv[]) {
         const auto selectedMode =
                 static_cast<std::uint8_t>(mode->currentData().toInt());
 
+        const QString startedAtUtc =
+                QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+        const QString runMode = mode->currentText();
+
         cancelRequested.store(false);
         cancel->setEnabled(true);
         start->setEnabled(false);
@@ -327,7 +586,7 @@ int main(int argc, char *argv[]) {
 
         activeThread = thread;
 
-        QObject::connect(thread, &QThread::finished, &window, [&, thread] {
+        QObject::connect(thread, &QThread::finished, &window, [&, thread, startedAtUtc, runMode] {
             thread->wait();
 
             const QString summary = outcomeText(runResult.outcome);
@@ -339,6 +598,23 @@ int main(int argc, char *argv[]) {
                         QString::fromStdString(runResult.detail);
             }
             log->appendPlainText(message);
+
+            QString saveError;
+            if (saveHistoryRun(
+                historyDb,
+                startedAtUtc,
+                QStringLiteral("pressure"),
+                runMode,
+                runResult,
+                saveError
+            )) {
+                log->appendPlainText(QStringLiteral("SQLite: прогон сохранён"));
+            } else {
+                log->appendPlainText(
+                    QStringLiteral("SQLite: не удалось сохранить прогон — %1")
+                    .arg(saveError)
+                );
+            }
 
             activeThread = nullptr;
             thread->deleteLater();

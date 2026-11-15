@@ -3,13 +3,7 @@ project(raketa_host LANGUAGES C CXX)
 
 set(RAKETA_QT_MAJOR "6" CACHE STRING "Qt major version (5 or 6)")
 
-if (RAKETA_QT_MAJOR STREQUAL "5")
-    find_package(Qt5 5.15 REQUIRED COMPONENTS Network Widgets)
-elseif (RAKETA_QT_MAJOR STREQUAL "6")
-    find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
-else ()
-    message(FATAL_ERROR "RAKETA_QT_MAJOR must be 5 or 6")
-endif ()
+find_package(Qt${RAKETA_QT_MAJOR} REQUIRED COMPONENTS Network Widgets Sql)
 
 add_executable(raketa_ping main.cpp)
 target_compile_features(raketa_ping PRIVATE cxx_std_17)
@@ -57,10 +51,15 @@ target_link_libraries(device_client_transport_check PRIVATE Qt${RAKETA_QT_MAJOR}
 
 add_executable(raketa_dashboard
         dashboard_main.cpp
+        history_store.cpp
         device_client.cpp
         test_runner.cpp
         ../firmware/protocol.c
 )
 target_include_directories(raketa_dashboard PRIVATE ../firmware)
 target_compile_features(raketa_dashboard PRIVATE c_std_11 cxx_std_17)
-target_link_libraries(raketa_dashboard PRIVATE Qt${RAKETA_QT_MAJOR}::Widgets Qt${RAKETA_QT_MAJOR}::Network)
+target_link_libraries(raketa_dashboard PRIVATE
+        Qt${RAKETA_QT_MAJOR}::Widgets
+        Qt${RAKETA_QT_MAJOR}::Network
+        Qt${RAKETA_QT_MAJOR}::Sql
+)
