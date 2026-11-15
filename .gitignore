@@ -3,7 +3,7 @@
 
 # Firmware and desktop builds
 /firmware/build-firmware/
-/host/build-host/
+/host/build-host*/
 
 # CLion CMake build directories
 cmake-build-*/
