@@ -7,3 +7,6 @@
 
 # CLion CMake build directories
 cmake-build-*/
+
+# Local editor include paths
+/.vscode/c_cpp_properties.json
