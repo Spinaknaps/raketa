@@ -13,11 +13,11 @@ struct PressureStep {
     std::uint32_t tolerancePa;
 };
 
-inline constexpr std::array<PressureStep, 3> pressureScenario{{
+inline const std::vector<PressureStep> pressureScenario{
     {100000u, 100000u, 1000u},
     { 90000u,  90000u, 1000u},
     { 80000u,  80000u, 1000u}
-}};
+};
 
 enum class TestOutcome {
     Pass,

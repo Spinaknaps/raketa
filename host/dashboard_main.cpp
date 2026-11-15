@@ -1,6 +1,7 @@
 #include "device_client.h"
 #include "test_runner.h"
 #include "history_store.h"
+#include "scenario_loader.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -31,6 +32,9 @@
 #include <QDialog>
 #include <QMessageBox>
 #include <QVariant>
+#include <QFileDialog>
+
+#include <tcl.h>
 
 #include <algorithm>
 #include <vector>
@@ -45,7 +49,8 @@ public:
         setMinimumSize(320, 150);
     }
 
-    void clear() {
+    void reset(std::size_t stepCount) {
+        stepCount_ = stepCount;
         steps_.clear();
         update();
     }
@@ -83,12 +88,17 @@ protected:
         painter.drawText(4, 32, QStringLiteral("%1 Па").arg(upperPa));
         painter.drawText(4, static_cast<int>(plot.bottom()), QStringLiteral("0"));
 
+        if (stepCount_ == 0u) {
+            return;
+        }
+
         const auto xForStep = [&](std::size_t number) {
             return plot.left() + plot.width() *
-                   (static_cast<double>(number) - 0.5) / pressureScenario.size();
+                   (static_cast<double>(number) - 0.5) /
+                   static_cast<double>(stepCount_);
         };
 
-        for (std::size_t number = 1; number <= pressureScenario.size(); ++number) {
+        for (std::size_t number = 1; number <= stepCount_; ++number) {
             painter.drawText(
                 QPointF(xForStep(number) - 4, plot.bottom() + 18),
                 QString::number(static_cast<qulonglong>(number))
@@ -130,6 +140,7 @@ protected:
 
 private:
     std::vector<StepResult> steps_;
+    std::size_t stepCount_ = 0u;
 };
 
 static QString outcomeText(TestOutcome outcome) {
@@ -211,8 +222,7 @@ static bool initializeHistorySchema(QSqlDatabase &db, QString &error) {
     return true;
 }
 
-static void showHistory(QSqlDatabase &db, QWidget *parent)
-{
+static void showHistory(QSqlDatabase &db, QWidget *parent) {
     if (!db.isOpen()) {
         QMessageBox::warning(
             parent, QStringLiteral("История"),
@@ -305,8 +315,8 @@ static void showHistory(QSqlDatabase &db, QWidget *parent)
 
             const QString reason = time->data(Qt::UserRole + 1).toString();
             detail->setText(reason.isEmpty()
-                ? QStringLiteral("Причина завершения отсутствует.")
-                : QStringLiteral("Причина: %1").arg(reason));
+                                ? QStringLiteral("Причина завершения отсутствует.")
+                                : QStringLiteral("Причина: %1").arg(reason));
 
             QSqlQuery query(db);
             if (!query.prepare(QStringLiteral(R"sql(
@@ -351,6 +361,7 @@ static void showHistory(QSqlDatabase &db, QWidget *parent)
 }
 
 int main(int argc, char *argv[]) {
+    Tcl_FindExecutable(argv[0]);
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("raketa"));
 
@@ -391,6 +402,30 @@ int main(int argc, char *argv[]) {
     auto *history = new QPushButton(QStringLiteral("История"));
     controls->addWidget(history);
     layout->addLayout(controls);
+    auto *scenarioControls = new QHBoxLayout;
+    auto *chooseScenario = new QPushButton(QStringLiteral("Выбрать Tcl-файл…"));
+    auto *scenarioLabel = new QLabel(QStringLiteral("Сценарий не выбран"));
+    scenarioLabel->setTextFormat(Qt::PlainText);
+
+    scenarioControls->addWidget(chooseScenario);
+    scenarioControls->addWidget(scenarioLabel, 1);
+    layout->addLayout(scenarioControls);
+
+    QString scenarioPath;
+
+    QObject::connect(chooseScenario, &QPushButton::clicked, &window, [&] {
+        const QString selectedPath = QFileDialog::getOpenFileName(
+            &window,
+            QStringLiteral("Выбрать сценарий испытания"),
+            scenarioPath,
+            QStringLiteral("Сценарии Tcl (*.tcl)")
+        );
+
+        if (!selectedPath.isEmpty()) {
+            scenarioPath = selectedPath;
+            scenarioLabel->setText(scenarioPath);
+        }
+    });
 
     auto *status = new QLabel(QStringLiteral("Статус: ожидание запуска"));
     layout->addWidget(status);
@@ -535,6 +570,26 @@ int main(int argc, char *argv[]) {
         const auto selectedMode =
                 static_cast<std::uint8_t>(mode->currentData().toInt());
 
+        if (scenarioPath.isEmpty()) {
+            status->setText(QStringLiteral("Сначала выбери Tcl-сценарий"));
+            return;
+        }
+
+        LoadedScenario loaded;
+        std::string loadError;
+        const auto pathUtf8 = scenarioPath.toUtf8();
+
+        if (!loadScenario(pathUtf8.constData(), loaded, loadError)) {
+            scenarioLabel->setText(scenarioPath);
+            status->setText(QStringLiteral("Ошибка сценария"));
+            log->appendPlainText(QString::fromUtf8(loadError.c_str()));
+            return;
+        }
+
+        const QString scenarioName = QString::fromUtf8(loaded.name.c_str());
+        scenarioLabel->setText(scenarioName);
+        scenarioLabel->setToolTip(scenarioPath);
+
         const QString startedAtUtc =
                 QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
         const QString runMode = mode->currentText();
@@ -547,11 +602,11 @@ int main(int argc, char *argv[]) {
         mode->setEnabled(false);
         status->setText(QStringLiteral("Идёт испытание…"));
         steps->setRowCount(0);
-        pressureChart->clear();
-        log->clear();
+        pressureChart->reset(loaded.steps.size());
+        chooseScenario->setEnabled(false);        log->clear();
         log->appendPlainText(QStringLiteral("Запуск испытания"));
 
-        auto *thread = QThread::create([host, tcpPort, selectedMode, &runResult, &window, showStep, &cancelRequested] {
+        auto *thread = QThread::create([host, tcpPort, selectedMode, &runResult, &window, showStep, &cancelRequested, scenarioSteps = loaded.steps] {
             QTcpSocket socket;
             socket.connectToHost(host, tcpPort);
 
@@ -573,7 +628,7 @@ int main(int argc, char *argv[]) {
 
             DeviceClient client(socket, &cancelRequested);
             runResult = runPressureTest(
-                client, selectedMode, pressureScenario,
+                client, selectedMode, scenarioSteps,
                 [&window, showStep](const StepResult &step) {
                     QMetaObject::invokeMethod(
                         &window,
@@ -586,7 +641,7 @@ int main(int argc, char *argv[]) {
 
         activeThread = thread;
 
-        QObject::connect(thread, &QThread::finished, &window, [&, thread, startedAtUtc, runMode] {
+        QObject::connect(thread, &QThread::finished, &window, [&, thread, startedAtUtc, runMode, scenarioName] {
             thread->wait();
 
             const QString summary = outcomeText(runResult.outcome);
@@ -603,7 +658,7 @@ int main(int argc, char *argv[]) {
             if (saveHistoryRun(
                 historyDb,
                 startedAtUtc,
-                QStringLiteral("pressure"),
+                scenarioName,
                 runMode,
                 runResult,
                 saveError
@@ -630,6 +685,7 @@ int main(int argc, char *argv[]) {
             address->setEnabled(true);
             port->setEnabled(true);
             mode->setEnabled(true);
+            chooseScenario->setEnabled(true);
         }, Qt::QueuedConnection);
 
         thread->start();
@@ -642,6 +698,8 @@ int main(int argc, char *argv[]) {
         activeThread->wait();
         delete activeThread;
     }
+
+    Tcl_Finalize();
 
     return exitCode;
 }
